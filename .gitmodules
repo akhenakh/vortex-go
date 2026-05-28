@@ -1,0 +1,3 @@
+[submodule "vortex-src"]
+	path = vortex-src
+	url = https://github.com/vortex-data/vortex.git
