@@ -1,4 +1,4 @@
-//go:generate cd ../vortex-src && cargo build -p vortex-ffi --release
+//go:generate sh -c "cd vortex-src && cargo build -p vortex-ffi --release"
 package vortex
 
 /*
