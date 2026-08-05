@@ -146,8 +146,12 @@ func TestEndToEndFileSinkAndScan(t *testing.T) {
 	ageDt := NewPrimitiveDType(PTypeU8, false)
 	heightDt := NewPrimitiveDType(PTypeU16, false)
 
-	fb.AddField("age", ageDt)
-	fb.AddField("height", heightDt)
+	if err := fb.AddField("age", ageDt); err != nil {
+		t.Fatalf("Failed to add age field: %v", err)
+	}
+	if err := fb.AddField("height", heightDt); err != nil {
+		t.Fatalf("Failed to add height field: %v", err)
+	}
 
 	fields := fb.Finalize()
 

@@ -22,8 +22,12 @@ func main() {
 
 	// 2. Define the Schema: Struct { id: u32, score: f64 }
 	fb := vortex.NewStructFieldsBuilder()
-	fb.AddField("id", vortex.NewPrimitiveDType(vortex.PTypeU32, false))
-	fb.AddField("score", vortex.NewPrimitiveDType(vortex.PTypeF64, false))
+	if err := fb.AddField("id", vortex.NewPrimitiveDType(vortex.PTypeU32, false)); err != nil {
+		log.Fatal(err)
+	}
+	if err := fb.AddField("score", vortex.NewPrimitiveDType(vortex.PTypeF64, false)); err != nil {
+		log.Fatal(err)
+	}
 
 	// Finalize fields and create the Struct DType
 	schema := vortex.NewStructDType(fb.Finalize(), false)

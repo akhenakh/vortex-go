@@ -7,7 +7,7 @@ This package provides a high-performance, zero-copy (where possible) Go interfac
 ## Prerequisites
 
 Because this library binds to a Rust core, you will need the following installed on your system:
-* **Go** (1.20+)
+* **Go** (1.26+)
 * **Rust** (cargo)
 * **A C Compiler** (gcc/clang)
 
@@ -55,8 +55,12 @@ func main() {
   
 	// 2. Define the Schema: Struct { id: u32, score: f64 }
 	fb := vortex.NewStructFieldsBuilder()
-	fb.AddField("id", vortex.NewPrimitiveDType(vortex.PTypeU32, false))
-	fb.AddField("score", vortex.NewPrimitiveDType(vortex.PTypeF64, false))
+	if err := fb.AddField("id", vortex.NewPrimitiveDType(vortex.PTypeU32, false)); err != nil {
+		log.Fatal(err)
+	}
+	if err := fb.AddField("score", vortex.NewPrimitiveDType(vortex.PTypeF64, false)); err != nil {
+		log.Fatal(err)
+	}
 	
 	// Finalize fields and create the Struct DType
 	schema := vortex.NewStructDType(fb.Finalize(), false)
@@ -79,8 +83,12 @@ func main() {
 
 	// 4. Combine into a Struct Array (Batch)
 	builder := vortex.NewStructColumnBuilder(val, 2)
-	builder.AddField("id", idArr)
-	builder.AddField("score", scoreArr)
+	if err := builder.AddField("id", idArr); err != nil {
+		log.Fatal(err)
+	}
+	if err := builder.AddField("score", scoreArr); err != nil {
+		log.Fatal(err)
+	}
 	
 	batch, err := builder.Finalize()
 	if err != nil {

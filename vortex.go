@@ -127,27 +127,11 @@ func checkError(err *C.vx_error) error {
 		return nil
 	}
 	defer C.vx_error_free(err)
-	msgStr := C.vx_error_get_message(err)
-	msg := C.GoStringN(C.vx_string_ptr(msgStr), C.int(C.vx_string_len(msgStr)))
-	return fmt.Errorf("vortex: %s", msg)
+	msgView := C.vx_error_message(err)
+	return fmt.Errorf("vortex: %s", C.GoStringN(msgView.ptr, C.int(msgView.len)))
 }
 
 // Internal Helpers
-
-func cStringList(strs []string) (**C.char, func()) {
-	if len(strs) == 0 {
-		return nil, func() {}
-	}
-	cStrs := make([]*C.char, len(strs))
-	for i, s := range strs {
-		cStrs[i] = C.CString(s)
-	}
-	return (**C.char)(unsafe.Pointer(&cStrs[0])), func() {
-		for _, c := range cStrs {
-			C.free(unsafe.Pointer(c))
-		}
-	}
-}
 
 // Session
 
@@ -257,11 +241,10 @@ func (d *DType) IsTimestamp() bool         { return bool(C.vx_dtype_is_timestamp
 func (d *DType) TimeUnit() uint8           { return uint8(C.vx_dtype_time_unit((*C.DType)(d.c))) }
 func (d *DType) TimeZone() string {
 	tz := C.vx_dtype_time_zone((*C.DType)(d.c))
-	if tz == nil {
+	if tz.ptr == nil {
 		return ""
 	}
-	defer C.vx_string_free(tz)
-	return C.GoStringN(C.vx_string_ptr(tz), C.int(C.vx_string_len(tz)))
+	return C.GoStringN(tz.ptr, C.int(tz.len))
 }
 
 // Arrow C-Data Interfaces
@@ -312,11 +295,11 @@ func (s *StructFields) NFields() uint64 {
 }
 
 func (s *StructFields) FieldName(idx int) string {
-	str := C.vx_struct_fields_field_name(s.c, C.size_t(idx))
-	if str == nil {
+	view := C.vx_struct_fields_field_name(s.c, C.size_t(idx))
+	if view.ptr == nil {
 		return ""
 	}
-	return C.GoStringN(C.vx_string_ptr(str), C.int(C.vx_string_len(str)))
+	return C.GoStringN(view.ptr, C.int(view.len))
 }
 
 func (s *StructFields) FieldDType(idx int) *DType {
@@ -341,17 +324,18 @@ func (b *StructFieldsBuilder) Free() {
 	}
 }
 
-func (b *StructFieldsBuilder) AddField(name string, dtype *DType) {
+func (b *StructFieldsBuilder) AddField(name string, dtype *DType) error {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	// Create vx string, do NOT defer free because C takes ownership
-	vxName := C.vx_string_new(cName, C.size_t(len(name)))
+	view := C.vx_view{ptr: cName, len: C.size_t(len(name))}
 
 	// Create raw C clone of dtype, do NOT defer free because C takes ownership
 	cClone := C.vx_dtype_clone(dtype.c)
 
-	C.vx_struct_fields_builder_add_field(b.c, vxName, cClone)
+	var cErr *C.vx_error
+	C.vx_struct_fields_builder_add_field(b.c, view, cClone, &cErr)
+	return checkError(cErr)
 }
 
 func (b *StructFieldsBuilder) Finalize() *StructFields {
@@ -439,8 +423,9 @@ func NewF16BitsScalar(bits uint16, nullable bool) *Scalar {
 func NewUTF8Scalar(val string, nullable bool) (*Scalar, error) {
 	cStr := C.CString(val)
 	defer C.free(unsafe.Pointer(cStr))
+	view := C.vx_view{ptr: cStr, len: C.size_t(len(val))}
 	var cErr *C.vx_error
-	c := C.vx_scalar_new_utf8(cStr, C.size_t(len(val)), C.bool(nullable), &cErr)
+	c := C.vx_scalar_new_utf8(view, C.bool(nullable), &cErr)
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
@@ -496,7 +481,7 @@ func NewFixedSizeListScalar(elementDtype *DType, elements []*Scalar, nullable bo
 		ptr = (**C.vx_scalar)(unsafe.Pointer(&cElems[0]))
 	}
 	var cErr *C.vx_error
-	c := C.vx_scalar_new_fixed_size_list(elementDtype.c, ptr, C.size_t(len(elements)), C.bool(nullable), &cErr)
+	c := C.vx_scalar_new_fixed_size_list(elementDtype.c, ptr, C.uint32_t(len(elements)), C.bool(nullable), &cErr)
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
@@ -560,9 +545,17 @@ func NewLiteralExpression(scalar *Scalar) (*Expression, error) {
 }
 
 func (e *Expression) Select(names []string) *Expression {
-	cNames, freeFn := cStringList(names)
-	defer freeFn()
-	c := C.vx_expression_select(cNames, C.size_t(len(names)), e.c)
+	views := make([]C.vx_view, len(names))
+	for i, n := range names {
+		cStr := C.CString(n)
+		defer C.free(unsafe.Pointer(cStr))
+		views[i] = C.vx_view{ptr: cStr, len: C.size_t(len(n))}
+	}
+	var ptr *C.vx_view
+	if len(views) > 0 {
+		ptr = &views[0]
+	}
+	c := C.vx_expression_select(ptr, C.size_t(len(names)), e.c)
 	return wrapExpression(c, true)
 }
 
@@ -608,7 +601,8 @@ func (e *Expression) IsNull() *Expression {
 func (e *Expression) GetItem(item string) *Expression {
 	cItem := C.CString(item)
 	defer C.free(unsafe.Pointer(cItem))
-	return wrapExpression(C.vx_expression_get_item(cItem, e.c), true)
+	view := C.vx_view{ptr: cItem, len: C.size_t(len(item))}
+	return wrapExpression(C.vx_expression_get_item(view, e.c), true)
 }
 
 func (e *Expression) ListContains(value *Expression) *Expression {
@@ -805,25 +799,32 @@ func (a *Array) GetStorageF64(index int) float64 {
 }
 
 func (a *Array) GetUTF8(index uint32) string {
-	vxStr := C.vx_array_get_utf8(a.c, C.uint32_t(index))
-	if vxStr == nil {
+	var cErr *C.vx_error
+	view := C.vx_array_utf8_at(a.c, C.size_t(index), &cErr)
+	if cErr != nil {
+		checkError(cErr)
 		return ""
 	}
-	defer C.vx_string_free(vxStr)
-	return C.GoStringN(C.vx_string_ptr(vxStr), C.int(C.vx_string_len(vxStr)))
+	if view.ptr == nil {
+		return ""
+	}
+	return C.GoStringN(view.ptr, C.int(view.len))
 }
 
 func (a *Array) GetBinary(index uint32) []byte {
-	vxBin := C.vx_array_get_binary(a.c, C.uint32_t(index))
-	if vxBin == nil {
+	var cErr *C.vx_error
+	view := C.vx_array_binary_at(a.c, C.size_t(index), &cErr)
+	if cErr != nil {
+		checkError(cErr)
 		return nil
 	}
-	defer C.vx_binary_free(vxBin)
-	length := C.vx_binary_len(vxBin)
-	if length == 0 {
+	if view.ptr == nil {
+		return nil
+	}
+	if view.len == 0 {
 		return []byte{}
 	}
-	return C.GoBytes(unsafe.Pointer(C.vx_binary_ptr(vxBin)), C.int(length))
+	return C.GoBytes(unsafe.Pointer(view.ptr), C.int(view.len))
 }
 
 func (a *Array) Apply(expr *Expression) (*Array, error) {
@@ -881,7 +882,8 @@ func (b *StructColumnBuilder) AddField(name string, array *Array) error {
 	var cErr *C.vx_error
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
-	C.vx_struct_column_builder_add_field(b.c, cName, array.c, &cErr)
+	view := C.vx_view{ptr: cName, len: C.size_t(len(name))}
+	C.vx_struct_column_builder_add_field(b.c, view, array.c, &cErr)
 	return checkError(cErr)
 }
 
@@ -904,9 +906,10 @@ type ArraySink struct {
 func OpenFileSink(session *Session, path string, dtype *DType) (*ArraySink, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
+	view := C.vx_view{ptr: cPath, len: C.size_t(len(path))}
 
 	var cErr *C.vx_error
-	c := C.vx_array_sink_open_file(session.c, cPath, dtype.c, &cErr)
+	c := C.vx_array_sink_open_file(session.c, view, dtype.c, &cErr)
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
@@ -953,7 +956,12 @@ func NewDataSource(session *Session, opts DataSourceOptions) (*DataSource, error
 	cPaths := C.CString(opts.Paths)
 	defer C.free(unsafe.Pointer(cPaths))
 
-	cOpts := C.vx_data_source_options{paths: cPaths}
+	view := (*C.vx_view)(C.malloc(C.size_t(unsafe.Sizeof(C.vx_view{}))))
+	defer C.free(unsafe.Pointer(view))
+	view.ptr = cPaths
+	view.len = C.size_t(len(opts.Paths))
+
+	cOpts := C.vx_data_source_options{paths: view, paths_len: C.size_t(1)}
 	var cErr *C.vx_error
 	c := C.vx_data_source_new(session.c, &cOpts, &cErr)
 	if err := checkError(cErr); err != nil {
@@ -994,7 +1002,6 @@ type ScanOptions struct {
 	RowRangeEnd   uint64
 	Selection     *ScanSelection
 	Limit         uint64
-	MaxThreads    uint64
 	Ordered       bool
 }
 
@@ -1025,7 +1032,6 @@ func (ds *DataSource) Scan(opts *ScanOptions) (*Scan, *Estimate, error) {
 		cOpts.row_range_begin = C.uint64_t(opts.RowRangeBegin)
 		cOpts.row_range_end = C.uint64_t(opts.RowRangeEnd)
 		cOpts.limit = C.uint64_t(opts.Limit)
-		cOpts.max_threads = C.uint64_t(opts.MaxThreads)
 		cOpts.ordered = C.bool(opts.Ordered)
 
 		if opts.Selection != nil {
@@ -1119,133 +1125,4 @@ func (p *Partition) ScanArrow(session *Session, stream unsafe.Pointer) error {
 	runtime.SetFinalizer(p, nil)
 
 	return checkError(cErr)
-}
-
-// File
-type File struct {
-	c *C.vx_file
-}
-
-func wrapFile(c *C.vx_file) *File {
-	if c == nil {
-		return nil
-	}
-	f := &File{c: c}
-	runtime.SetFinalizer(f, (*File).Free)
-	return f
-}
-
-func (f *File) Free() {
-	if f.c != nil {
-		C.vx_file_free(f.c)
-		f.c = nil
-		runtime.SetFinalizer(f, nil)
-	}
-}
-
-func (f *File) Clone() *File {
-	return wrapFile(C.vx_file_clone(f.c))
-}
-
-type FileOpenOptions struct {
-	URI          string
-	PropertyKeys []string
-	PropertyVals []string
-}
-
-func OpenReader(session *Session, opts FileOpenOptions) (*File, error) {
-	cURI := C.CString(opts.URI)
-	defer C.free(unsafe.Pointer(cURI))
-
-	cKeys, freeKeys := cStringList(opts.PropertyKeys)
-	defer freeKeys()
-	cVals, freeVals := cStringList(opts.PropertyVals)
-	defer freeVals()
-
-	cOpts := C.vx_file_open_options{
-		uri:           cURI,
-		property_keys: cKeys,
-		property_vals: cVals,
-		property_len:  C.int(len(opts.PropertyKeys)),
-	}
-
-	var cErr *C.vx_error
-	c := C.vx_file_open_reader(session.c, &cOpts, &cErr)
-	if err := checkError(cErr); err != nil {
-		return nil, err
-	}
-	return wrapFile(c), nil
-}
-
-func WriteArray(session *Session, path string, array *Array) error {
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-
-	var cErr *C.vx_error
-	C.vx_file_write_array(session.c, cPath, array.c, &cErr)
-	return checkError(cErr)
-}
-
-func (f *File) RowCount() uint64 {
-	return uint64(C.vx_file_row_count(f.c))
-}
-
-func (f *File) DType() *DType {
-	return wrapDType(C.vx_file_dtype(f.c), false)
-}
-
-func (f *File) CanPrune(session *Session, filterExpression string) (bool, error) {
-	cExpr := C.CString(filterExpression)
-	defer C.free(unsafe.Pointer(cExpr))
-	var cErr *C.vx_error
-	res := C.vx_file_can_prune(session.c, f.c, cExpr, C.uint(len(filterExpression)), &cErr)
-	if err := checkError(cErr); err != nil {
-		return false, err
-	}
-	return bool(res), nil
-}
-
-type FileScanOptions struct {
-	ProjectionExpression string
-	FilterExpression     string
-	SplitByRowCount      int
-	RowRangeStart        uint64
-	RowRangeEnd          uint64
-	RowOffset            uint64
-}
-
-func (f *File) Scan(session *Session, opts *FileScanOptions) (*ArrayIterator, error) {
-	var cOpts *C.vx_file_scan_options
-	var cOptsVal C.vx_file_scan_options
-
-	var cProj, cFilt *C.char
-	if opts != nil {
-		cOpts = &cOptsVal
-		if opts.ProjectionExpression != "" {
-			cProj = C.CString(opts.ProjectionExpression)
-			defer C.free(unsafe.Pointer(cProj))
-			cOpts.projection_expression = cProj
-			cOpts.projection_expr_len = C.uint(len(opts.ProjectionExpression))
-		}
-		if opts.FilterExpression != "" {
-			cFilt = C.CString(opts.FilterExpression)
-			defer C.free(unsafe.Pointer(cFilt))
-			cOpts.filter_expression = cFilt
-			cOpts.filter_expression_len = C.uint(len(opts.FilterExpression))
-		}
-		cOpts.split_by_row_count = C.int(opts.SplitByRowCount)
-		cOpts.row_range_start = C.ulong(opts.RowRangeStart)
-		cOpts.row_range_end = C.ulong(opts.RowRangeEnd)
-		cOpts.row_offset = C.ulong(opts.RowOffset)
-	}
-
-	var cErr *C.vx_error
-	c := C.vx_file_scan(session.c, f.c, cOpts, &cErr)
-	if err := checkError(cErr); err != nil {
-		return nil, err
-	}
-
-	i := &ArrayIterator{c: c}
-	runtime.SetFinalizer(i, (*ArrayIterator).Free)
-	return i, nil
 }
