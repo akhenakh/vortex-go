@@ -235,30 +235,22 @@ func (d *DType) FixedSizeListElement() *DType {
 	return wrapDType(C.vx_dtype_fixed_size_list_element(d.c), false)
 }
 func (d *DType) FixedSizeListSize() uint32 { return uint32(C.vx_dtype_fixed_size_list_size(d.c)) }
-func (d *DType) IsTime() bool              { return bool(C.vx_dtype_is_time((*C.DType)(d.c))) }
-func (d *DType) IsDate() bool              { return bool(C.vx_dtype_is_date((*C.DType)(d.c))) }
-func (d *DType) IsTimestamp() bool         { return bool(C.vx_dtype_is_timestamp((*C.DType)(d.c))) }
-func (d *DType) TimeUnit() uint8           { return uint8(C.vx_dtype_time_unit((*C.DType)(d.c))) }
-func (d *DType) TimeZone() string {
-	tz := C.vx_dtype_time_zone((*C.DType)(d.c))
-	if tz.ptr == nil {
-		return ""
-	}
-	return C.GoStringN(tz.ptr, C.int(tz.len))
-}
 
-// Arrow C-Data Interfaces
-func (d *DType) ToArrowSchema(schema unsafe.Pointer) error {
+// Arrow C-Data Interfaces.
+//
+// The C-API resolves extension types through the session's Arrow conversion
+// registry, so a session must be supplied.
+func (d *DType) ToArrowSchema(session *Session, schema unsafe.Pointer) error {
 	var cErr *C.vx_error
-	if C.vx_dtype_to_arrow_schema(d.c, (*C.FFI_ArrowSchema)(schema), &cErr) != 0 {
+	if C.vx_dtype_to_arrow_schema(session.c, d.c, (*C.FFI_ArrowSchema)(schema), &cErr) != 0 {
 		return checkError(cErr)
 	}
 	return nil
 }
 
-func DTypeFromArrowSchema(schema unsafe.Pointer) (*DType, error) {
+func DTypeFromArrowSchema(session *Session, schema unsafe.Pointer) (*DType, error) {
 	var cErr *C.vx_error
-	dt := C.vx_dtype_from_arrow_schema((*C.FFI_ArrowSchema)(schema), &cErr)
+	dt := C.vx_dtype_from_arrow_schema(session.c, (*C.FFI_ArrowSchema)(schema), &cErr)
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
@@ -505,6 +497,56 @@ func NewStructScalar(structDType *DType, fields []*Scalar) (*Scalar, error) {
 	return wrapScalar(c, true), nil
 }
 
+// NewExtensionScalar builds an extension scalar from its logical dtype and a storage scalar.
+func NewExtensionScalar(dtype *DType, storage *Scalar) (*Scalar, error) {
+	var cErr *C.vx_error
+	c := C.vx_scalar_new_extension(dtype.c, storage.c, &cErr)
+	if err := checkError(cErr); err != nil {
+		return nil, err
+	}
+	return wrapScalar(c, true), nil
+}
+
+// Accessors
+//
+// The typed getters panic in Rust if the scalar is null or of a mismatched
+// type, so callers should check IsNull (and the matching dtype) first. Use the
+// array helpers (Array.GetU8, ...) for safe element access.
+
+func (s *Scalar) GetBool() bool      { return bool(C.vx_scalar_get_bool(s.c)) }
+func (s *Scalar) GetU8() uint8       { return uint8(C.vx_scalar_get_u8(s.c)) }
+func (s *Scalar) GetU16() uint16     { return uint16(C.vx_scalar_get_u16(s.c)) }
+func (s *Scalar) GetU32() uint32     { return uint32(C.vx_scalar_get_u32(s.c)) }
+func (s *Scalar) GetU64() uint64     { return uint64(C.vx_scalar_get_u64(s.c)) }
+func (s *Scalar) GetI8() int8        { return int8(C.vx_scalar_get_i8(s.c)) }
+func (s *Scalar) GetI16() int16      { return int16(C.vx_scalar_get_i16(s.c)) }
+func (s *Scalar) GetI32() int32      { return int32(C.vx_scalar_get_i32(s.c)) }
+func (s *Scalar) GetI64() int64      { return int64(C.vx_scalar_get_i64(s.c)) }
+func (s *Scalar) GetF32() float32    { return float32(C.vx_scalar_get_f32(s.c)) }
+func (s *Scalar) GetF64() float64    { return float64(C.vx_scalar_get_f64(s.c)) }
+func (s *Scalar) GetF16Bits() uint16 { return uint16(C.vx_scalar_get_f16_bits(s.c)) }
+
+func (s *Scalar) GetDecimalI8() int8   { return int8(C.vx_scalar_get_decimal_i8(s.c)) }
+func (s *Scalar) GetDecimalI16() int16 { return int16(C.vx_scalar_get_decimal_i16(s.c)) }
+func (s *Scalar) GetDecimalI32() int32 { return int32(C.vx_scalar_get_decimal_i32(s.c)) }
+func (s *Scalar) GetDecimalI64() int64 { return int64(C.vx_scalar_get_decimal_i64(s.c)) }
+
+func (s *Scalar) GetUTF8() string {
+	view := C.vx_scalar_get_utf8(s.c)
+	if view.ptr == nil {
+		return ""
+	}
+	return C.GoStringN(view.ptr, C.int(view.len))
+}
+
+func (s *Scalar) GetBinary() []byte {
+	view := C.vx_scalar_get_binary(s.c)
+	if view.ptr == nil || view.len == 0 {
+		return nil
+	}
+	return C.GoBytes(unsafe.Pointer(view.ptr), C.int(view.len))
+}
+
 // Expression
 
 type Expression struct {
@@ -636,13 +678,16 @@ func (v *Validity) toC() C.vx_validity {
 type Array struct {
 	c     *C.vx_array
 	owned bool
+	// session is a non-owning execution context used for element access
+	// (Array.Scalar and the typed getters). It must outlive the array.
+	session *Session
 }
 
-func wrapArray(c *C.vx_array, owned bool) *Array {
+func wrapArraySession(c *C.vx_array, owned bool, session *Session) *Array {
 	if c == nil {
 		return nil
 	}
-	a := &Array{c: c, owned: owned}
+	a := &Array{c: c, owned: owned, session: session}
 	if owned {
 		runtime.SetFinalizer(a, (*Array).Free)
 	}
@@ -658,7 +703,7 @@ func (a *Array) Free() {
 }
 
 func (a *Array) Clone() *Array {
-	return wrapArray(C.vx_array_clone(a.c), true)
+	return wrapArraySession(C.vx_array_clone(a.c), true, a.session)
 }
 
 func (a *Array) IsNullable() bool { return bool(C.vx_array_is_nullable(a.c)) }
@@ -683,7 +728,7 @@ func (a *Array) Validity() (*Validity, error) {
 	}
 	return &Validity{
 		Type:  ValidityType(cVal._type),
-		Array: wrapArray(cVal.array, true),
+		Array: wrapArraySession(cVal.array, true, a.session),
 	}, nil
 }
 
@@ -693,7 +738,7 @@ func (a *Array) Field(index int) (*Array, error) {
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	return wrapArray(c, true), nil
+	return wrapArraySession(c, true, a.session), nil
 }
 
 func (a *Array) Slice(start, stop int) (*Array, error) {
@@ -702,12 +747,15 @@ func (a *Array) Slice(start, stop int) (*Array, error) {
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	return wrapArray(c, true), nil
+	return wrapArraySession(c, true, a.session), nil
 }
 
 func (a *Array) ElementIsInvalid(index int) (bool, error) {
+	if a.session == nil || a.session.c == nil {
+		return false, fmt.Errorf("vortex: array has no live session")
+	}
 	var cErr *C.vx_error
-	res := C.vx_array_element_is_invalid(a.c, C.size_t(index), &cErr)
+	res := C.vx_array_element_is_invalid(a.session.c, a.c, C.size_t(index), &cErr)
 	if err := checkError(cErr); err != nil {
 		return false, err
 	}
@@ -723,12 +771,12 @@ func (a *Array) InvalidCount() (int, error) {
 	return int(res), nil
 }
 
-func NewNullArray(len int) *Array {
-	return wrapArray(C.vx_array_new_null(C.size_t(len)), true)
+func NewNullArray(session *Session, len int) *Array {
+	return wrapArraySession(C.vx_array_new_null(C.size_t(len)), true, session)
 }
 
 // NewPrimitiveArray accepts a generic slice. It copies the underlying data.
-func NewPrimitiveArray[T any](ptype PType, data []T, validity *Validity) (*Array, error) {
+func NewPrimitiveArray[T any](session *Session, ptype PType, data []T, validity *Validity) (*Array, error) {
 	var cErr *C.vx_error
 	cVal := validity.toC()
 
@@ -740,63 +788,65 @@ func NewPrimitiveArray[T any](ptype PType, data []T, validity *Validity) (*Array
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	return wrapArray(c, true), nil
+	return wrapArraySession(c, true, session), nil
 }
 
-func ArrayFromArrow(arrowArray, arrowSchema unsafe.Pointer, nullable bool) (*Array, error) {
+func ArrayFromArrow(session *Session, arrowArray, arrowSchema unsafe.Pointer, nullable bool) (*Array, error) {
 	var cErr *C.vx_error
-	c := C.vx_array_from_arrow((*C.FFI_ArrowArray)(arrowArray), (*C.FFI_ArrowSchema)(arrowSchema), C.bool(nullable), &cErr)
+	c := C.vx_array_from_arrow(session.c, (*C.FFI_ArrowArray)(arrowArray), (*C.FFI_ArrowSchema)(arrowSchema), C.bool(nullable), &cErr)
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	return wrapArray(c, true), nil
+	return wrapArraySession(c, true, session), nil
 }
 
-func (a *Array) GetU8(index int) uint8    { return uint8(C.vx_array_get_u8(a.c, C.size_t(index))) }
-func (a *Array) GetU16(index int) uint16  { return uint16(C.vx_array_get_u16(a.c, C.size_t(index))) }
-func (a *Array) GetU32(index int) uint32  { return uint32(C.vx_array_get_u32(a.c, C.size_t(index))) }
-func (a *Array) GetU64(index int) uint64  { return uint64(C.vx_array_get_u64(a.c, C.size_t(index))) }
-func (a *Array) GetI8(index int) int8     { return int8(C.vx_array_get_i8(a.c, C.size_t(index))) }
-func (a *Array) GetI16(index int) int16   { return int16(C.vx_array_get_i16(a.c, C.size_t(index))) }
-func (a *Array) GetI32(index int) int32   { return int32(C.vx_array_get_i32(a.c, C.size_t(index))) }
-func (a *Array) GetI64(index int) int64   { return int64(C.vx_array_get_i64(a.c, C.size_t(index))) }
-func (a *Array) GetF16(index int) uint16  { return uint16(C.vx_array_get_f16(a.c, C.size_t(index))) }
-func (a *Array) GetF32(index int) float32 { return float32(C.vx_array_get_f32(a.c, C.size_t(index))) }
-func (a *Array) GetF64(index int) float64 { return float64(C.vx_array_get_f64(a.c, C.size_t(index))) }
+// Scalar returns the element at "index" as a Scalar, using the array's session
+// as execution context. A Null scalar is returned for invalid elements.
+//
+// Executing the array is expensive (it decodes the element), so for large scans
+// prefer an Arrow export via Partition.ScanArrow when possible.
+func (a *Array) Scalar(index int) (*Scalar, error) {
+	if a.session == nil || a.session.c == nil {
+		return nil, fmt.Errorf("vortex: array has no live session")
+	}
+	var cErr *C.vx_error
+	c := C.vx_array_get_scalar(a.session.c, a.c, C.size_t(index), &cErr)
+	if err := checkError(cErr); err != nil {
+		return nil, err
+	}
+	return wrapScalar(c, true), nil
+}
 
-func (a *Array) GetStorageU8(index int) uint8 {
-	return uint8(C.vx_array_get_storage_u8(a.c, C.size_t(index)))
+// scalarValue executes the element at index and applies fn to it. It yields the
+// zero value on error or for a null element, mirroring the previous C-API
+// behaviour where invalid elements returned an unspecified value.
+func scalarValue[T any](a *Array, index int, fn func(*Scalar) T) T {
+	var zero T
+	s, err := a.Scalar(index)
+	if err != nil || s == nil {
+		return zero
+	}
+	if s.IsNull() {
+		s.Free()
+		return zero
+	}
+	v := fn(s)
+	s.Free()
+	return v
 }
-func (a *Array) GetStorageU16(index int) uint16 {
-	return uint16(C.vx_array_get_storage_u16(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageU32(index int) uint32 {
-	return uint32(C.vx_array_get_storage_u32(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageU64(index int) uint64 {
-	return uint64(C.vx_array_get_storage_u64(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageI8(index int) int8 {
-	return int8(C.vx_array_get_storage_i8(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageI16(index int) int16 {
-	return int16(C.vx_array_get_storage_i16(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageI32(index int) int32 {
-	return int32(C.vx_array_get_storage_i32(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageI64(index int) int64 {
-	return int64(C.vx_array_get_storage_i64(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageF16(index int) uint16 {
-	return uint16(C.vx_array_get_storage_f16(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageF32(index int) float32 {
-	return float32(C.vx_array_get_storage_f32(a.c, C.size_t(index)))
-}
-func (a *Array) GetStorageF64(index int) float64 {
-	return float64(C.vx_array_get_storage_f64(a.c, C.size_t(index)))
-}
+
+func (a *Array) GetBool(index int) bool   { return scalarValue(a, index, (*Scalar).GetBool) }
+func (a *Array) GetU8(index int) uint8    { return scalarValue(a, index, (*Scalar).GetU8) }
+func (a *Array) GetU16(index int) uint16  { return scalarValue(a, index, (*Scalar).GetU16) }
+func (a *Array) GetU32(index int) uint32  { return scalarValue(a, index, (*Scalar).GetU32) }
+func (a *Array) GetU64(index int) uint64  { return scalarValue(a, index, (*Scalar).GetU64) }
+func (a *Array) GetI8(index int) int8     { return scalarValue(a, index, (*Scalar).GetI8) }
+func (a *Array) GetI16(index int) int16   { return scalarValue(a, index, (*Scalar).GetI16) }
+func (a *Array) GetI32(index int) int32   { return scalarValue(a, index, (*Scalar).GetI32) }
+func (a *Array) GetI64(index int) int64   { return scalarValue(a, index, (*Scalar).GetI64) }
+func (a *Array) GetF16(index int) uint16  { return scalarValue(a, index, (*Scalar).GetF16Bits) }
+func (a *Array) GetF32(index int) float32 { return scalarValue(a, index, (*Scalar).GetF32) }
+func (a *Array) GetF64(index int) float64 { return scalarValue(a, index, (*Scalar).GetF64) }
 
 func (a *Array) GetUTF8(index uint32) string {
 	var cErr *C.vx_error
@@ -833,39 +883,21 @@ func (a *Array) Apply(expr *Expression) (*Array, error) {
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	return wrapArray(c, true), nil
-}
-
-// ArrayIterator
-type ArrayIterator struct {
-	c *C.vx_array_iterator
-}
-
-func (i *ArrayIterator) Free() {
-	if i.c != nil {
-		C.vx_array_iterator_free(i.c)
-		i.c = nil
-		runtime.SetFinalizer(i, nil)
-	}
-}
-
-func (i *ArrayIterator) Next() (*Array, error) {
-	var cErr *C.vx_error
-	c := C.vx_array_iterator_next(i.c, &cErr)
-	if err := checkError(cErr); err != nil {
-		return nil, err
-	}
-	return wrapArray(c, true), nil
+	return wrapArraySession(c, true, a.session), nil
 }
 
 // StructColumnBuilder
 type StructColumnBuilder struct {
-	c *C.vx_struct_column_builder
+	c       *C.vx_struct_column_builder
+	session *Session
 }
 
-func NewStructColumnBuilder(validity *Validity, capacity int) *StructColumnBuilder {
+func NewStructColumnBuilder(session *Session, validity *Validity, capacity int) *StructColumnBuilder {
 	cVal := validity.toC()
-	b := &StructColumnBuilder{c: C.vx_struct_column_builder_new(&cVal, C.size_t(capacity))}
+	b := &StructColumnBuilder{
+		c:       C.vx_struct_column_builder_new(&cVal, C.size_t(capacity)),
+		session: session,
+	}
 	runtime.SetFinalizer(b, (*StructColumnBuilder).Free)
 	return b
 }
@@ -895,7 +927,7 @@ func (b *StructColumnBuilder) Finalize() (*Array, error) {
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	return wrapArray(c, true), nil
+	return wrapArraySession(c, true, b.session), nil
 }
 
 // ArraySink
@@ -931,7 +963,8 @@ func (s *ArraySink) Close() error {
 
 // Data Source & Scan
 type DataSource struct {
-	c *C.vx_data_source
+	c       *C.vx_data_source
+	session *Session
 }
 
 func (ds *DataSource) Free() {
@@ -943,7 +976,7 @@ func (ds *DataSource) Free() {
 }
 
 func (ds *DataSource) Clone() *DataSource {
-	clone := &DataSource{c: C.vx_data_source_clone(ds.c)}
+	clone := &DataSource{c: C.vx_data_source_clone(ds.c), session: ds.session}
 	runtime.SetFinalizer(clone, (*DataSource).Free)
 	return clone
 }
@@ -967,7 +1000,7 @@ func NewDataSource(session *Session, opts DataSourceOptions) (*DataSource, error
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	ds := &DataSource{c: c}
+	ds := &DataSource{c: c, session: session}
 	runtime.SetFinalizer(ds, (*DataSource).Free)
 	return ds, nil
 }
@@ -1006,7 +1039,8 @@ type ScanOptions struct {
 }
 
 type Scan struct {
-	c *C.vx_scan
+	c       *C.vx_scan
+	session *Session
 }
 
 func (s *Scan) Free() {
@@ -1054,7 +1088,7 @@ func (ds *DataSource) Scan(opts *ScanOptions) (*Scan, *Estimate, error) {
 		Type:  EstimateType(cEst._type),
 		Value: uint64(cEst.estimate),
 	}
-	s := &Scan{c: c}
+	s := &Scan{c: c, session: ds.session}
 	runtime.SetFinalizer(s, (*Scan).Free)
 	return s, est, nil
 }
@@ -1077,13 +1111,14 @@ func (s *Scan) NextPartition() (*Partition, error) {
 	if p == nil {
 		return nil, nil // Exhausted
 	}
-	part := &Partition{c: p}
+	part := &Partition{c: p, session: s.session}
 	runtime.SetFinalizer(part, (*Partition).Free)
 	return part, nil
 }
 
 type Partition struct {
-	c *C.vx_partition
+	c       *C.vx_partition
+	session *Session
 }
 
 func (p *Partition) Free() {
@@ -1113,7 +1148,7 @@ func (p *Partition) Next() (*Array, error) {
 	if err := checkError(cErr); err != nil {
 		return nil, err
 	}
-	return wrapArray(c, true), nil
+	return wrapArraySession(c, true, p.session), nil
 }
 
 func (p *Partition) ScanArrow(session *Session, stream unsafe.Pointer) error {

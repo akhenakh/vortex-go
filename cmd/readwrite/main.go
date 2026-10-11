@@ -36,20 +36,20 @@ func main() {
 	// 3. Create Data Arrays
 	val := &vortex.Validity{Type: vortex.ValidityNonNullable}
 
-	idArr, err := vortex.NewPrimitiveArray(vortex.PTypeU32, []uint32{1, 2, 3}, val)
+	idArr, err := vortex.NewPrimitiveArray(session, vortex.PTypeU32, []uint32{1, 2, 3}, val)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer idArr.Free()
 
-	scoreArr, err := vortex.NewPrimitiveArray(vortex.PTypeF64, []float64{95.5, 82.0, 42.1}, val)
+	scoreArr, err := vortex.NewPrimitiveArray(session, vortex.PTypeF64, []float64{95.5, 82.0, 42.1}, val)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer scoreArr.Free()
 
 	// 4. Combine into a Struct Array (Batch)
-	builder := vortex.NewStructColumnBuilder(val, 2)
+	builder := vortex.NewStructColumnBuilder(session, val, 2)
 	builder.AddField("id", idArr)
 	builder.AddField("score", scoreArr)
 

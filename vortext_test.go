@@ -66,10 +66,13 @@ func TestScalars(t *testing.T) {
 }
 
 func TestPrimitiveArray(t *testing.T) {
+	session := NewSession()
+	defer session.Free()
+
 	data := []uint32{10, 20, 30, 40, 50}
 	val := &Validity{Type: ValidityNonNullable}
 
-	arr, err := NewPrimitiveArray(PTypeU32, data, val)
+	arr, err := NewPrimitiveArray(session, PTypeU32, data, val)
 	if err != nil {
 		t.Fatalf("Failed to create array: %v", err)
 	}
@@ -84,29 +87,46 @@ func TestPrimitiveArray(t *testing.T) {
 			t.Errorf("At index %d: expected %d, got %d", i, expected, got)
 		}
 	}
+
+	// The low-level scalar extraction path returns a typed Scalar.
+	scalar, err := arr.Scalar(2)
+	if err != nil {
+		t.Fatalf("Failed to extract scalar: %v", err)
+	}
+	defer scalar.Free()
+
+	if scalar.IsNull() {
+		t.Error("Expected scalar to be valid")
+	}
+	if got := scalar.GetU32(); got != 30 {
+		t.Errorf("Expected scalar value 30, got %d", got)
+	}
 }
 
 func TestStructBuilder(t *testing.T) {
+	session := NewSession()
+	defer session.Free()
+
 	// Create columns
 	ages := []uint8{25, 30, 35}
 	heights := []uint16{170, 180, 175}
 
 	val := &Validity{Type: ValidityNonNullable}
 
-	ageArr, err := NewPrimitiveArray(PTypeU8, ages, val)
+	ageArr, err := NewPrimitiveArray(session, PTypeU8, ages, val)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ageArr.Free()
 
-	heightArr, err := NewPrimitiveArray(PTypeU16, heights, val)
+	heightArr, err := NewPrimitiveArray(session, PTypeU16, heights, val)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer heightArr.Free()
 
 	// Build struct
-	builder := NewStructColumnBuilder(val, 2)
+	builder := NewStructColumnBuilder(session, val, 2)
 
 	err = builder.AddField("age", ageArr)
 	if err != nil {
@@ -164,10 +184,10 @@ func TestEndToEndFileSinkAndScan(t *testing.T) {
 	heights := []uint16{100, 120, 140, 160, 180}
 	val := &Validity{Type: ValidityNonNullable}
 
-	ageArr, _ := NewPrimitiveArray(PTypeU8, ages, val)
-	heightArr, _ := NewPrimitiveArray(PTypeU16, heights, val)
+	ageArr, _ := NewPrimitiveArray(session, PTypeU8, ages, val)
+	heightArr, _ := NewPrimitiveArray(session, PTypeU16, heights, val)
 
-	builder := NewStructColumnBuilder(val, 2)
+	builder := NewStructColumnBuilder(session, val, 2)
 	builder.AddField("age", ageArr)
 	builder.AddField("height", heightArr)
 

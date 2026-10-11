@@ -8,7 +8,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/akhenakh/vortex-go" 
+	"github.com/akhenakh/vortex-go"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/cdata"
@@ -70,7 +70,7 @@ func main() {
 	defer scanDType.Free()
 
 	var cSchema cdata.CArrowSchema
-	if err := scanDType.ToArrowSchema(unsafe.Pointer(&cSchema)); err != nil {
+	if err := scanDType.ToArrowSchema(session, unsafe.Pointer(&cSchema)); err != nil {
 		log.Fatalf("Failed to export Arrow schema: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func main() {
 		if err := partition.ScanArrow(session, unsafe.Pointer(&cStream)); err != nil {
 			log.Fatalf("Failed to scan partition to Arrow Stream: %v", err)
 		}
-		
+
 		// Import the stream natively into Go using Apache Arrow
 		reader, err := cdata.ImportCRecordReader(&cStream, arrowSchema)
 		if err != nil {
@@ -119,7 +119,7 @@ func main() {
 			// We dynamically check for Int32/Int64 since TLC schemas vary by year.
 			var locIDs32 []int32
 			var locIDs64 []int64
-			
+
 			switch col := rec.Column(0).(type) {
 			case *array.Int32:
 				locIDs32 = col.Int32Values()
